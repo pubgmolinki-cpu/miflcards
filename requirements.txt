@@ -2,3 +2,4 @@ aiogram
 async
 python-dotenv
 asyncpg
+aiohttp
