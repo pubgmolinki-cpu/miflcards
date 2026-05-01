@@ -1,21 +1,37 @@
 import os
 import asyncio
+import re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandObject
 from database import Database
 import asyncpg
+from aiohttp import web
 
-# Конфигурация из Environment Variables Render
+# --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_IDS = [1866813859] # ВСТАВЬ СВОЙ ID СЮДА
-CHANNEL_URL = "https://t.me/Miflcards"
-CHANNEL_ID = "@Miflcards"
+# Впиши сюда свой ID, чтобы команды работали
+ADMIN_IDS = [123456789] 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# Временное хранилище для фото админов
 admin_photo_storage = {}
+
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не падал по таймауту портов) ---
+async def handle(request):
+    return web.Response(text="MIFL CARDS Bot is Running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
 
 # --- КЛАВИАТУРЫ ---
 def main_menu():
@@ -29,79 +45,99 @@ def main_menu():
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- ПРОВЕРКА ПОДПИСКИ ---
-async def check_sub(user_id):
-    try:
-        member = await bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except: return False
+# --- АДМИНСКИЕ КОМАНДЫ ---
 
-# --- ОБРАБОТКА КОМАНД ---
-@dp.message(Command("start"))
-async def start(message: types.Message, db: Database, command: CommandObject):
-    user_id = message.from_user.id
-    username = message.from_user.username or message.from_user.first_name
-    
-    user = await db.get_user(user_id)
-    if not user:
-        args = command.args
-        referrer = int(args) if args and args.isdigit() else None
-        await db.pool.execute("INSERT INTO users (user_id, username, referrer_id) VALUES ($1, $2, $3)", 
-                             user_id, username, referrer)
-    
-    await message.answer(f"Добро пожаловать в MIFL CARDS! ⚽", reply_markup=main_menu())
-
-# --- АДМИН ПАНЕЛЬ ---
 @dp.message(F.photo, F.from_user.id.in_(ADMIN_IDS))
 async def admin_photo(message: types.Message):
     admin_photo_storage[message.from_user.id] = message.photo[-1].file_id
-    await message.answer("📸 Фото сохранено. Используй /add_player Имя, Рейтинг, Клуб, Позиция, Редкость")
+    await message.answer("📸 Фото запомнил! Теперь введи:\n`/add_player Имя, Рейтинг, Клуб, Позиция, Редкость`", parse_mode="Markdown")
 
 @dp.message(Command("add_player"), F.from_user.id.in_(ADMIN_IDS))
 async def add_player(message: types.Message, command: CommandObject, db: Database):
     p_id = admin_photo_storage.get(message.from_user.id)
-    if not p_id: return await message.answer("❌ Сначала кинь фото!")
+    if not p_id: 
+        return await message.answer("❌ Сначала отправь фото игрока!")
     
+    if not command.args:
+        return await message.answer("❌ Формат: `/add_player Месси, 5.0, Интер, ПФА, One`", parse_mode="Markdown")
+
     try:
         args = [a.strip() for a in command.args.split(",")]
-        await db.pool.execute("INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)",
-                             args[0], float(args[1]), args[2], args[3], args[4], p_id)
+        await db.pool.execute(
+            "INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            args[0], float(args[1]), args[2], args[3], args[4], p_id
+        )
         del admin_photo_storage[message.from_user.id]
-        await message.answer(f"✅ Игрок {args[0]} добавлен!")
-    except: await message.answer("❌ Ошибка. Формат: Имя, 5.0, Клуб, Поз, Редкость")
+        await message.answer(f"✅ Игрок **{args[0]} успешно добавлен!", parse_mode="Markdown")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
-# --- ЛОГИКА КНОПОК ---
+@dp.message(Command("reset_progress"), F.from_user.id.in_(ADMIN_IDS))
+async def reset_user(message: types.Message, command: CommandObject, db: Database):
+    if not command.args: return
+    uid = int(command.args)
+    await db.pool.execute("DELETE FROM inventory WHERE user_id = $1", uid)
+    await db.pool.execute("UPDATE users SET stars = 500 WHERE user_id = $1", uid)
+    await message.answer(f"🧹 Прогресс {uid} сброшен.")
+
+# --- ОСНОВНЫЕ ФУНКЦИИ ---
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, db: Database):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
+    await db.pool.execute(
+        "INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        user_id, username
+    )
+    await message.answer(f"⚽ Привет, {username}! Ты в MIFL CARDS.", reply_markup=main_menu())
+
 @dp.callback_query(F.data == "get_card")
 async def get_card(callback: types.CallbackQuery, db: Database):
-    if not await check_sub(callback.from_user.id):
-        return await callback.answer("❌ Подпишись на канал!", show_alert=True)
+    user_id = callback.from_user.id
+    u = await db.get_user(user_id)
     
-    u = await db.get_user(callback.from_user.id)
-    is_vip = await db.is_vip(callback.from_user.id)
+    is_vip = await db.is_vip(user_id)
     cd = 2 if is_vip else 4
     
     if u['last_free_card'] and datetime.now() < u['last_free_card'] + timedelta(hours=cd):
-        return await callback.answer("⏳ Кулдаун!", show_alert=True)
+        return await callback.answer("⏳ Рано! Отдыхай.", show_alert=True)
     
     card = await db.get_random_card()
-    if not card: return await callback.answer("База карт пуста!")
+    if not card:
+        return await callback.answer("❌ В базе пока нет карт!", show_alert=True)
     
-    await db.add_card_to_inventory(u['user_id'], card['card_id'])
-    await db.set_cooldown(u['user_id'], 'last_free_card')
-    await callback.message.answer_photo(card['photo_id'], caption=f"🎁 Выпала карта: {card['name']}")
+    await db.add_card_to_inventory(user_id, card['card_id'])
+    await db.set_cooldown(user_id, 'last_free_card')
+    
+    await callback.message.answer_photo(
+        card['photo_id'], 
+        caption=f"🎁 Тебе выпал: **\nРедкость: {card['rarity']}",
+        parse_mode="Markdown"
+    )
 
-@dp.callback_query(F.data == "shop")
-async def shop(callback: types.CallbackQuery):
-    txt = "🛒 **МАГАЗИН**\n\n👑 VIP (1 день) - 20,000🌟\n🟡 One Pack - 3,500🌟\n..."
+@dp.callback_query(F.data == "profile")
+async def show_profile(callback: types.CallbackQuery, db: Database):
+    u = await db.get_user(callback.from_user.id)
+    is_v = "👑 VIP" if await db.is_vip(callback.from_user.id) else "👤 Обычный"
+    txt = f"👤 **ПРОФИЛЬ**\n\n💰 Звезды: {u['stars']} 🌟\n💎 Статус: {is_v}"
     await callback.message.edit_text(txt, reply_markup=main_menu())
 
 # --- ЗАПУСК ---
 async def main():
+    # Запускаем веб-заглушку для Render
+    asyncio.create_task(start_web_server())
+    
     pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
     db = Database(pool)
     await db.create_tables()
+    
     dp["db"] = db
+    print("🚀 Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Бот остановлен")
