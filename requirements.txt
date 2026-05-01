@@ -1,0 +1,3 @@
+aiogram
+async
+python-dotenv
