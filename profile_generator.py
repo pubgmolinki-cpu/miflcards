@@ -35,7 +35,7 @@ async def generate_profile_image(avatar_data, nickname, stars, cards_count, stat
             
             # НОВЫЕ КООРДИНАТЫ (Правее и Ниже)
             # X: 150 (было 125), Y: 50 (было 15)
-            bg.paste(ava, (140, 50), mask) 
+            bg.paste(ava, (120, 50), mask) 
         except:
             pass
 
