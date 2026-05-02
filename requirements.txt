@@ -3,5 +3,4 @@ async
 python-dotenv
 asyncpg
 aiohttp
-pillow
-PIL
+Pillow
