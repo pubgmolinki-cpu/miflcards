@@ -24,7 +24,6 @@ async def generate_profile_image(avatar_data, nickname, stars, cards_count, stat
         font_nick = font_label = font_val = ImageFont.load_default()
 
     # --- АВАТАРКА ---
-    # Смещаем вправо (125) и значительно выше (15)
     if avatar_data:
         try:
             ava = Image.open(io.BytesIO(avatar_data)).convert("RGBA")
@@ -34,25 +33,28 @@ async def generate_profile_image(avatar_data, nickname, stars, cards_count, stat
             mask = Image.new('L', size, 0)
             ImageDraw.Draw(mask).ellipse((0, 0, size[0], size[1]), fill=255)
             
-            # Новые координаты для точного попадания в кольцо
-            bg.paste(ava, (125, 15), mask) 
+            # НОВЫЕ КООРДИНАТЫ (Правее и Ниже)
+            # X: 150 (было 125), Y: 50 (было 15)
+            bg.paste(ava, (150, 50), mask) 
         except:
             pass
 
     # --- НИКНЕЙМ ---
-    # Y = 90 — это центр аватарки (15 + 150/2)
-    # X = 295 — небольшой отступ от края аватарки
-    draw.text((295, 90), str(nickname), font=font_nick, fill="white", anchor="lm")
+    # Центрируем по вертикали относительно авы (50 + 150/2 = 125)
+    # X: 320, чтобы был небольшой отступ от края круга
+    draw.text((320, 125), str(nickname), font=font_nick, fill="white", anchor="lm")
 
-    # --- СТАТИСТИКА (Оставляем без изменений) ---
+    # --- СТАТИСТИКА (Оставляем идеальные позиции) ---
     LABEL_Y = 350 
     VALUE_Y = 390
     col_stars, col_cards, col_status = 267, 513, 758
 
     draw.text((col_stars, LABEL_Y), "Баланс Звёзд:", font=font_label, fill="#CCFFCC", anchor="mm")
     draw.text((col_stars, VALUE_Y), f"{stars:,}".replace(",", " "), font=font_val, fill="white", anchor="mm")
+
     draw.text((col_cards, LABEL_Y), "Количество Карт:", font=font_label, fill="#CCFFCC", anchor="mm")
     draw.text((col_cards, VALUE_Y), str(cards_count), font=font_val, fill="white", anchor="mm")
+
     draw.text((col_status, LABEL_Y), "Статус:", font=font_label, fill="#CCFFCC", anchor="mm")
     status_color = "#FFD700" if status == "VIP" else "white"
     draw.text((col_status, VALUE_Y), str(status), font=font_val, fill=status_color, anchor="mm")
