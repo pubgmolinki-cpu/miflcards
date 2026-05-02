@@ -12,7 +12,6 @@ from aiogram.types import BufferedInputFile
 from aiohttp import web
 import asyncpg
 
-# Твои модули
 from database import Database
 from profile_generator import generate_profile_image
 
@@ -24,7 +23,7 @@ ADMIN_IDS = [1866813859]  # ЗАМЕНИ НА СВОЙ ID
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Редкости и коэффициенты (Stock=🟢, Drop=🔴)
+# Редкости
 RARITY_CONFIG = {
     "One": {"icon": "🟡", "price": 3500, "coef": 2.5},
     "Chase": {"icon": "🟣", "price": 2800, "coef": 2.1},
@@ -33,7 +32,6 @@ RARITY_CONFIG = {
     "Stock": {"icon": "🟢", "price": 500, "coef": 1.2}
 }
 
-# --- СОСТОЯНИЯ ---
 class AddPlayer(StatesGroup):
     waiting_for_photo = State()
     waiting_for_details = State()
@@ -41,7 +39,6 @@ class AddPlayer(StatesGroup):
 class GuessGame(StatesGroup):
     bet = State()
 
-# --- КЛАВИАТУРЫ ---
 def main_kb():
     kb = [
         [types.KeyboardButton(text="🎁 Получить Карту")],
@@ -51,7 +48,13 @@ def main_kb():
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# --- ВЕБ-СЕРВЕР (Для Render) ---
+# Динамический бонус для бесплатных паков
+def get_dynamic_bonus(rating: float) -> int:
+    if rating <= 2.0: return random.randint(67, 1000)
+    if rating <= 3.5: return random.randint(670, 1400)
+    if rating <= 4.5: return random.randint(1100, 1900)
+    return random.randint(1700, 2500)
+
 async def handle(request): return web.Response(text="Bot is running")
 async def start_web():
     app = web.Application()
@@ -59,10 +62,6 @@ async def start_web():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080))).start()
-
-# ==========================================
-# ОСНОВНАЯ ЛОГИКА
-# ==========================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, command: CommandObject, db: Database):
@@ -76,7 +75,35 @@ async def cmd_start(message: types.Message, command: CommandObject, db: Database
     )
     await message.answer("⚽ Добро пожаловать в **MIFL CARDS**!", reply_markup=main_kb(), parse_mode="Markdown")
 
-# --- ПРОФИЛЬ (ГРАФИКА + ТЕКСТ) ---
+# --- 🎁 БЕСПЛАТНАЯ КАРТА (ВЕРНУЛ) ---
+@dp.message(F.text == "🎁 Получить Карту")
+async def handle_free_card(message: types.Message, db: Database):
+    user_id = message.from_user.id
+    u = await db.get_user(user_id)
+    is_vip = await db.is_vip(user_id)
+    
+    cd_hours = 2 if is_vip else 4
+    if u['last_free_card'] and datetime.now() < u['last_free_card'] + timedelta(hours=cd_hours):
+        diff = (u['last_free_card'] + timedelta(hours=cd_hours)) - datetime.now()
+        return await message.answer(f"⏳ Доступно через {int(diff.total_seconds()//3600)}ч {int((diff.total_seconds()%3600)//60)}м")
+
+    card = await db.get_random_card()
+    if not card: return await message.answer("❌ Карт пока нет в базе.")
+
+    msg = await message.answer("Открываем пак 📦...")
+    await asyncio.sleep(2.0)
+    await msg.delete()
+
+    bonus = get_dynamic_bonus(card['rating'])
+    await db.update_stars(user_id, bonus)
+    await db.add_card_to_inventory(user_id, card['card_id'])
+    await db.set_cooldown(user_id, 'last_free_card')
+
+    icon = RARITY_CONFIG.get(card['rarity'], {}).get('icon', '⚪')
+    caption = f"🎁 **БЕСПЛАТНАЯ КАРТА**\n\n👤 {card['name']}\n⭐ Рейтинг: {card['rating']}\n{icon} {card['rarity']}\n\n💰 Бонус: `+{bonus}` 🌟"
+    await message.answer_photo(card['photo_id'], caption=caption, parse_mode="Markdown")
+
+# --- 👤 ПРОФИЛЬ ---
 @dp.message(F.text == "👤 Профиль")
 async def handle_profile(message: types.Message, db: Database):
     user_id = message.from_user.id
@@ -88,7 +115,6 @@ async def handle_profile(message: types.Message, db: Database):
         count = await db.pool.fetchval("SELECT COUNT(*) FROM inventory WHERE user_id = $1", user_id)
         status = "VIP" if is_vip else "Обычный"
 
-        # Получаем аватарку
         ava_bytes = None
         try:
             photos = await bot.get_user_profile_photos(user_id, limit=1)
@@ -98,12 +124,10 @@ async def handle_profile(message: types.Message, db: Database):
                 ava_bytes = content.read()
         except: pass
 
-        # Генерация картинки
         img_buf = await generate_profile_image(
             ava_bytes, u['username'], u['stars'], count, status
         )
 
-        # Текстовое описание
         stars_f = f"{u['stars']:,}".replace(",", " ")
         caption = (
             f"👤 **ПРОФИЛЬ: {u['username']}**\n\n"
@@ -121,42 +145,27 @@ async def handle_profile(message: types.Message, db: Database):
         )
     finally: await load.delete()
 
-# --- АДМИН: ДОБАВИТЬ ИГРОКА ---
-@dp.message(Command("add_player"))
-async def admin_add(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS: return
-    await message.answer("📸 Отправь фото игрока:")
-    await state.set_state(AddPlayer.waiting_for_photo)
+# --- 👥 РЕФЕРАЛЫ (ВЕРНУЛ) ---
+@dp.message(F.text == "👥 Рефералы")
+async def show_refs(message: types.Message):
+    me = await bot.get_me()
+    await message.answer(f"🔗 Твоя реферальная ссылка:\n`https://t.me/{me.username}?start={message.from_user.id}`", parse_mode="Markdown")
 
-@dp.message(AddPlayer.waiting_for_photo, F.photo)
-async def admin_photo(message: types.Message, state: FSMContext):
-    await state.update_data(photo_id=message.photo[-1].file_id)
-    await message.answer("📝 Введи: `Имя | Рейтинг | Клуб | Позиция`", parse_mode="Markdown")
-    await state.set_state(AddPlayer.waiting_for_details)
+# --- 📊 ТОП-10 (ВЕРНУЛ) ---
+@dp.message(F.text == "📊 ТОП-10")
+async def show_top(message: types.Message, db: Database):
+    top = await db.pool.fetch("SELECT username, stars FROM users ORDER BY stars DESC LIMIT 10")
+    txt = "📊 **ТОП-10 БОГАТЕЕВ:**\n\n"
+    for i, r in enumerate(top): 
+        txt += f"{i+1}. {r['username']} — `{r['stars']}` 🌟\n"
+    await message.answer(txt, parse_mode="Markdown")
 
-@dp.message(AddPlayer.waiting_for_details)
-async def admin_final(message: types.Message, state: FSMContext, db: Database):
-    try:
-        name, rat, club, pos = [i.strip() for i in message.text.split("|")]
-        rating = float(rat.replace(",", "."))
-        
-        # Авто-редкость
-        if rating <= 1.5: rar = "Stock"
-        elif rating <= 2.5: rar = "Series"
-        elif rating <= 3.5: rar = "Drop"
-        elif rating <= 4.5: rar = "Chase"
-        else: rar = "One"
+# --- ⚽ МИНИ-ИГРЫ ---
+@dp.message(F.text == "⚽ Мини Игры")
+async def mini_games_menu(message: types.Message):
+    kb = [[types.InlineKeyboardButton(text="🧩 Угадайка", callback_data="play_guess")]]
+    await message.answer("⚽ Выбери игру:", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
 
-        data = await state.get_data()
-        await db.pool.execute(
-            "INSERT INTO mifl_cards (name, rating, rarity, club, position, photo_id) VALUES ($1,$2,$3,$4,$5,$6)",
-            name, rating, rar, club, pos, data['photo_id']
-        )
-        await message.answer(f"✅ Добавлен: {name} ({RARITY_CONFIG[rar]['icon']} {rar})")
-        await state.clear()
-    except: await message.answer("❌ Ошибка формата!")
-
-# --- МИНИ-ИГРЫ: УГАДАЙКА ---
 @dp.callback_query(F.data == "play_guess")
 async def guess_start(callback: types.CallbackQuery, db: Database, state: FSMContext):
     u = await db.get_user(callback.from_user.id)
@@ -207,7 +216,7 @@ async def guess_ans(callback: types.CallbackQuery, db: Database):
         await callback.message.answer_photo(card['photo_id'], caption=f"✅ **ВЕРНО!**.")
     await callback.answer()
 
-# --- МАГАЗИН ---
+# --- 🛒 МАГАЗИН ---
 @dp.message(F.text == "🛒 Магазин")
 async def shop(message: types.Message):
     buttons = []
@@ -226,6 +235,40 @@ async def buy_vip(callback: types.CallbackQuery, db: Database):
     await db.pool.execute("UPDATE users SET vip_until = $1 WHERE user_id = $2", exp, callback.from_user.id)
     await callback.message.answer("👑 VIP активирован! КД снижено в 2 раза.")
     await callback.answer()
+
+# --- ДОБАВИТЬ ИГРОКА ---
+@dp.message(Command("add_player"))
+async def admin_add(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("📸 Отправь фото игрока:")
+    await state.set_state(AddPlayer.waiting_for_photo)
+
+@dp.message(AddPlayer.waiting_for_photo, F.photo)
+async def admin_photo(message: types.Message, state: FSMContext):
+    await state.update_data(photo_id=message.photo[-1].file_id)
+    await message.answer("📝 Введи: `Имя | Рейтинг | Клуб | Позиция`", parse_mode="Markdown")
+    await state.set_state(AddPlayer.waiting_for_details)
+
+@dp.message(AddPlayer.waiting_for_details)
+async def admin_final(message: types.Message, state: FSMContext, db: Database):
+    try:
+        name, rat, club, pos = [i.strip() for i in message.text.split("|")]
+        rating = float(rat.replace(",", "."))
+        
+        if rating <= 1.5: rar = "Stock"
+        elif rating <= 2.5: rar = "Series"
+        elif rating <= 3.5: rar = "Drop"
+        elif rating <= 4.5: rar = "Chase"
+        else: rar = "One"
+
+        data = await state.get_data()
+        await db.pool.execute(
+            "INSERT INTO mifl_cards (name, rating, rarity, club, position, photo_id) VALUES ($1,$2,$3,$4,$5,$6)",
+            name, rating, rar, club, pos, data['photo_id']
+        )
+        await message.answer(f"✅ Добавлен: {name} ({RARITY_CONFIG[rar]['icon']} {rar})")
+        await state.clear()
+    except: await message.answer("❌ Ошибка формата!")
 
 # --- ЗАПУСК ---
 async def main():
