@@ -1,13 +1,11 @@
 import io
 import os
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
-# Пути к файлам
 TEMPLATE_PATH = "profile_template.png"
 FONT_PATH = "font.ttf"
 
-# Кэшируем шаблон, чтобы не читать его с диска каждый раз
 BASE_TEMPLATE = None
 if os.path.exists(TEMPLATE_PATH):
     BASE_TEMPLATE = Image.open(TEMPLATE_PATH).convert("RGBA")
@@ -19,33 +17,37 @@ async def generate_profile_image(avatar_data, nickname, stars, cards_count, stat
     bg = BASE_TEMPLATE.copy()
     draw = ImageDraw.Draw(bg)
 
-    # Настройка шрифтов (уменьшенные размеры)
     try:
-        font_nick = ImageFont.truetype(FONT_PATH, 34)
+        font_nick = ImageFont.truetype(FONT_PATH, 36)
         font_label = ImageFont.truetype(FONT_PATH, 18)
-        font_val = ImageFont.truetype(FONT_PATH, 24)
+        font_val = ImageFont.truetype(FONT_PATH, 26)
     except:
         font_nick = font_label = font_val = ImageFont.load_default()
 
-    # Вставка аватарки (слева сверху)
+    # --- АВАТАРКА ---
     if avatar_data:
         try:
             ava = Image.open(io.BytesIO(avatar_data)).convert("RGBA")
-            ava = ava.resize((140, 140), Image.Resampling.LANCZOS)
-            mask = Image.new('L', (140, 140), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, 140, 140), fill=255)
-            bg.paste(ava, (125, 118), mask) # Точные координаты под круг
-        except:
-            pass
+            # Чуть увеличил размер для идеального попадания в кольцо
+            ava = ava.resize((146, 146), Image.Resampling.LANCZOS)
+            mask = Image.new('L', (146, 146), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, 146, 146), fill=255)
+            
+            # Сдвинул ВВЕРХ и ВЛЕВО, чтобы попасть ровно в белую обводку шаблона
+            bg.paste(ava, (95, 88), mask) 
+        except Exception as e:
+            print("Ошибка авы:", e)
 
-    # Отрисовка ника
-    draw.text((285, 165), str(nickname), font=font_nick, fill="white")
+    # --- НИКНЕЙМ ---
+    # Поднял выше (Y=140), чтобы быть по центру аватарки, и сдвинул чуть левее
+    draw.text((260, 140), str(nickname), font=font_nick, fill="white")
 
-    # Координаты статистики (подняты выше по Y)
-    LABEL_Y = 385 
-    VALUE_Y = 425
+    # --- СТАТИСТИКА ---
+    # Поднял тексты ВЫШЕ к иконкам (было 385 и 425)
+    LABEL_Y = 350 
+    VALUE_Y = 390
     
-    # Колонки X
+    # Колонки по оси X (они стоят ровно под иконками, их не трогаем)
     col_stars = 267
     col_cards = 513
     col_status = 758
