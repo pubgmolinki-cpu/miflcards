@@ -12,7 +12,7 @@ from aiogram.types import BufferedInputFile
 from aiohttp import web
 import asyncpg
 
-# Импорт твоих модулей
+# Твои модули
 from database import Database
 from profile_generator import generate_profile_image
 
@@ -24,10 +24,7 @@ ADMIN_IDS = [1866813859]  # ЗАМЕНИ НА СВОЙ ID
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Кэш для ускорения работы профиля
-avatar_cache = {}
-
-# Редкости и цены (Stock = 🟢, Drop = 🔴)
+# Редкости и коэффициенты (Stock=🟢, Drop=🔴)
 RARITY_CONFIG = {
     "One": {"icon": "🟡", "price": 3500, "coef": 2.5},
     "Chase": {"icon": "🟣", "price": 2800, "coef": 2.1},
@@ -54,7 +51,7 @@ def main_kb():
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# --- ВЕБ-СЕРВЕР ---
+# --- ВЕБ-СЕРВЕР (Для Render) ---
 async def handle(request): return web.Response(text="Bot is running")
 async def start_web():
     app = web.Application()
@@ -64,7 +61,7 @@ async def start_web():
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080))).start()
 
 # ==========================================
-# ОСНОВНЫЕ ХЕНДЛЕРЫ
+# ОСНОВНАЯ ЛОГИКА
 # ==========================================
 
 @dp.message(Command("start"))
@@ -79,7 +76,7 @@ async def cmd_start(message: types.Message, command: CommandObject, db: Database
     )
     await message.answer("⚽ Добро пожаловать в **MIFL CARDS**!", reply_markup=main_kb(), parse_mode="Markdown")
 
-# --- ГРАФИЧЕСКИЙ ПРОФИЛЬ ---
+# --- ПРОФИЛЬ (ГРАФИКА + ТЕКСТ) ---
 @dp.message(F.text == "👤 Профиль")
 async def handle_profile(message: types.Message, db: Database):
     user_id = message.from_user.id
@@ -88,46 +85,43 @@ async def handle_profile(message: types.Message, db: Database):
     try:
         u = await db.get_user(user_id)
         is_vip = await db.is_vip(user_id)
-        cards_count = await db.pool.fetchval("SELECT COUNT(*) FROM inventory WHERE user_id = $1", user_id)
-        status_txt = "VIP" if is_vip else "Обычный"
+        count = await db.pool.fetchval("SELECT COUNT(*) FROM inventory WHERE user_id = $1", user_id)
+        status = "VIP" if is_vip else "Обычный"
 
-        # Работа с кэшем аватарок
-        cached = avatar_cache.get(user_id)
-        if not cached or cached['exp'] < datetime.now().timestamp():
+        # Получаем аватарку
+        ava_bytes = None
+        try:
             photos = await bot.get_user_profile_photos(user_id, limit=1)
             if photos.total_count > 0:
-                file = await bot.get_file(photos.photos[0][1].file_id)
-                ava_bytes = await bot.download_file(file.file_path)
-                avatar_cache[user_id] = {'data': ava_bytes, 'exp': datetime.now().timestamp() + 300}
-            else: ava_bytes = None
-        else: ava_bytes = cached['data']
+                file = await bot.get_file(photos.photos[0][0].file_id)
+                content = await bot.download_file(file.file_path)
+                ava_bytes = content.read()
+        except: pass
 
+        # Генерация картинки
         img_buf = await generate_profile_image(
-            avatar_url=io.BytesIO(ava_bytes) if ava_bytes else None,
-            nickname=message.from_user.username or message.from_user.first_name,
-            stars=u['stars'],
-            cards_count=cards_count,
-            status=status_txt
+            ava_bytes, u['username'], u['stars'], count, status
         )
 
+        # Текстовое описание
+        stars_f = f"{u['stars']:,}".replace(",", " ")
         caption = (
-            f"👤 **ПРОФИЛЬ ИГРОКА**\n\n"
-            f"💰 **Баланс:** `{u['stars']:,}` 🌟\n"
-            f"🎴 **Карт в базе:** `{cards_count}`\n"
-            f"👑 **Статус:** `{status_txt}`"
-        ).replace(",", " ")
+            f"👤 **ПРОФИЛЬ: {u['username']}**\n\n"
+            f"💰 **Баланс:** `{stars_f}` 🌟\n"
+            f"🎴 **Коллекция:** `{count}` шт.\n"
+            f"👑 **Статус:** `{status}`\n"
+        )
 
+        photo_input = BufferedInputFile(img_buf.read(), filename="profile.png")
         await message.answer_photo(
-            BufferedInputFile(img_buf.read(), filename="p.png"),
-            caption=caption,
+            photo_input, caption=caption, 
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text="🎴 Моя коллекция", callback_data="my_collection")]
-            ]),
-            parse_mode="Markdown"
+            ]), parse_mode="Markdown"
         )
     finally: await load.delete()
 
-# --- АДМИН: ДОБАВЛЕНИЕ КАРТ ---
+# --- АДМИН: ДОБАВИТЬ ИГРОКА ---
 @dp.message(Command("add_player"))
 async def admin_add(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
@@ -146,7 +140,7 @@ async def admin_final(message: types.Message, state: FSMContext, db: Database):
         name, rat, club, pos = [i.strip() for i in message.text.split("|")]
         rating = float(rat.replace(",", "."))
         
-        # Определение редкости
+        # Авто-редкость
         if rating <= 1.5: rar = "Stock"
         elif rating <= 2.5: rar = "Series"
         elif rating <= 3.5: rar = "Drop"
@@ -158,12 +152,11 @@ async def admin_final(message: types.Message, state: FSMContext, db: Database):
             "INSERT INTO mifl_cards (name, rating, rarity, club, position, photo_id) VALUES ($1,$2,$3,$4,$5,$6)",
             name, rating, rar, club, pos, data['photo_id']
         )
-        icon = RARITY_CONFIG[rar]['icon']
-        await message.answer(f"✅ Добавлен: {name} ({icon} {rar})")
+        await message.answer(f"✅ Добавлен: {name} ({RARITY_CONFIG[rar]['icon']} {rar})")
         await state.clear()
     except: await message.answer("❌ Ошибка формата!")
 
-# --- МИНИ-ИГРА УГАДАЙКА ---
+# --- МИНИ-ИГРЫ: УГАДАЙКА ---
 @dp.callback_query(F.data == "play_guess")
 async def guess_start(callback: types.CallbackQuery, db: Database, state: FSMContext):
     u = await db.get_user(callback.from_user.id)
@@ -183,7 +176,7 @@ async def guess_bet(message: types.Message, state: FSMContext, db: Database):
     if not message.text.isdigit(): return
     bet = int(message.text)
     u = await db.get_user(message.from_user.id)
-    if bet < 1 or bet > 25000 or bet > u['stars']: return await message.answer("❌ Неверная ставка!")
+    if bet < 1 or bet > 25000 or bet > u['stars']: return await message.answer("❌ Ошибка ставки.")
 
     card = await db.get_random_card()
     wrong = await db.pool.fetch("SELECT name FROM mifl_cards WHERE name != $1 ORDER BY RANDOM() LIMIT 3", card['name'])
@@ -197,7 +190,7 @@ async def guess_bet(message: types.Message, state: FSMContext, db: Database):
     await db.set_cooldown(message.from_user.id, 'last_game_guess')
     
     await message.answer(
-        f"🧩 **КТО ЭТО?**\n⭐ Рейтинг: `{card['rating']}`\n📈 Коэф: `x{coef}`",
+        f"🧩 **УГАДАЙКА**\n⭐ Рейтинг: `{card['rating']}`\n📈 Коэф: `x{coef}`",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown"
     )
     await state.clear()
@@ -211,7 +204,7 @@ async def guess_ans(callback: types.CallbackQuery, db: Database):
         win = int(int(bet) * RARITY_CONFIG[card['rarity']]['coef'])
         await db.update_stars(callback.from_user.id, win)
         await callback.message.delete()
-        await callback.message.answer_photo(card['photo_id'], caption=f"✅ **УГАДАЛ!**.")
+        await callback.message.answer_photo(card['photo_id'], caption=f"✅ **ВЕРНО!**.")
     await callback.answer()
 
 # --- МАГАЗИН ---
@@ -231,7 +224,7 @@ async def buy_vip(callback: types.CallbackQuery, db: Database):
     await db.update_stars(callback.from_user.id, -20000)
     exp = datetime.now() + timedelta(days=1)
     await db.pool.execute("UPDATE users SET vip_until = $1 WHERE user_id = $2", exp, callback.from_user.id)
-    await callback.message.answer("👑 VIP активирован на 24 часа! КД снижено в 2 раза.")
+    await callback.message.answer("👑 VIP активирован! КД снижено в 2 раза.")
     await callback.answer()
 
 # --- ЗАПУСК ---
@@ -241,6 +234,7 @@ async def main():
     db = Database(pool)
     await db.create_tables()
     dp["db"] = db
+    print("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
