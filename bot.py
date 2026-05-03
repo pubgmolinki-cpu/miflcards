@@ -19,12 +19,13 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = "@Miflcards"
-ADMIN_IDS = [1866813859]
+ADMIN_IDS = [5185444605]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Импорт функции генерации (предполагаем, что файл profile_generator.py в той же папке)
 try:
     from profile_generator import generate_profile_image
 except ImportError:
@@ -119,7 +120,6 @@ async def refs_menu(message: types.Message, state: FSMContext):
     link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
     await message.answer(f"👥 <b>Реферальная программа</b>\n\nБонус 5 000 🌟 за каждого приглашенного друга!\n\nТвоя ссылка:\n<code>{link}</code>", parse_mode="HTML")
 
-# --- ПОДПИСКА ---
 async def check_subscription(user_id):
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
@@ -136,7 +136,7 @@ async def verify_sub_callback(call: types.CallbackQuery, state: FSMContext, db: 
     else:
         await call.answer("❌ Ты всё еще не подписан!", show_alert=True)
 
-# --- ПРОФИЛЬ И КОЛЛЕКЦИЯ ---
+# --- ПРОФИЛЬ ---
 @dp.message(F.text == "👤 Профиль")
 async def view_profile(message: types.Message, state: FSMContext, db: Database):
     await state.clear()
@@ -149,11 +149,11 @@ async def view_profile(message: types.Message, state: FSMContext, db: Database):
     if is_vip:
         st_text = "VIP 💎"
         st_full = f"VIP 💎 (до {u['vip_until'].strftime('%d.%m.%y | %H:%M')})"
-        color = "yellow"
+        st_color = "yellow"
     else:
         st_text = "Обычный 👤"
         st_full = st_text
-        color = "white"
+        st_color = "white"
     
     caption = f"👤 <b>Профиль: {u['username']}</b>\n💰 Баланс: {u['stars']:,} 🌟\n🎴 Карт: {cnt}\n👑 Статус: {st_full}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎴 Моя Коллекция", callback_data="view_col_0")]])
@@ -166,11 +166,11 @@ async def view_profile(message: types.Message, state: FSMContext, db: Database):
             downloaded = await bot.download_file(file.file_path)
             avatar_bytes = downloaded.read()
 
-        img_io = await generate_profile_image(avatar_bytes, u['username'], u['stars'], cnt, st_text, color=color)
+        img_io = await generate_profile_image(avatar_bytes, u['username'], u['stars'], cnt, st_text, color=st_color)
         if img_io:
-            return await message.answer_photo(BufferedInputFile(img_io.read(), filename="p.png"), caption=caption, reply_markup=kb, parse_mode="HTML")
+            return await message.answer_photo(BufferedInputFile(img_io.read(), filename="profile.png"), caption=caption, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Avatar error: {e}")
+        logging.error(f"Profile image error: {e}")
     
     await message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
@@ -278,10 +278,10 @@ async def cmd_bonus(message: types.Message, state: FSMContext, db: Database):
         return await message.answer(f"⏳ Следующий бонус через {diff.seconds // 3600}ч.")
     
     chance = random.random()
-    if chance < 0.10: # Удачливый день 10%
+    if chance < 0.10: 
         val = random.randint(6000, 15000)
         txt = f"Сегодня у вас «Удачливый День 🤑».\n\nВаш бонус: {val} ⭐"
-    else: # Обычный день 90%
+    else:
         val = random.randint(1000, 4000)
         txt = f"Сегодня у вас «Обычный День».\n\nВаш бонус: {val} ⭐"
         
@@ -398,10 +398,23 @@ async def promo_use(message: types.Message, state: FSMContext, db: Database):
 async def leaderboard(message: types.Message, state: FSMContext, db: Database):
     await state.clear()
     rows = await db.pool.fetch("SELECT username, stars FROM users ORDER BY stars DESC LIMIT 10")
-    txt = "🏆 <b>ТОП-10 ИГРОКОВ:</b>\n\n" + "\n".join([f"{i+1}. {r['username']} — {r['stars']} 🌟" for i, r in enumerate(rows)])
+    txt = "🏆 <b>ТОП-10 ИГРОКОВ:</b>\n\n" + "\n".join([f"{i+1}. {r['username']} — {r['stars']:,} 🌟" for i, r in enumerate(rows)])
     await message.answer(txt, parse_mode="HTML")
 
 # --- АДМИНКА ---
+@dp.message(Command("add_promo"), F.from_user.id.in_(ADMIN_IDS))
+async def adm_promo(message: types.Message, command: CommandObject, db: Database):
+    try:
+        code, stars, uses = command.args.split()
+        await db.pool.execute("INSERT INTO promocodes (code, stars, max_uses) VALUES ($1, $2, $3)", code.upper(), int(stars), int(uses))
+        await message.answer(f"✅ Промокод {code.upper()} на {stars} 🌟 создан!")
+    except: await message.answer("❌ Формат: /add_promo КОД ЗВЕЗДЫ ЛИМИТ")
+
+@dp.message(Command("clear_cards"), F.from_user.id.in_(ADMIN_IDS))
+async def adm_clear(message: types.Message, db: Database):
+    await db.pool.execute("TRUNCATE TABLE mifl_cards CASCADE")
+    await message.answer("⚠️ Все карты удалены из базы!")
+
 @dp.message(Command("add_player"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_add_p(message: types.Message, state: FSMContext):
     await message.answer("Отправь фото игрока:")
@@ -418,16 +431,16 @@ async def adm_p_save(message: types.Message, state: FSMContext, db: Database):
     d = [x.strip() for x in message.text.split(",")]
     rating = float(d[1])
     
-    # Авто-определение редкости
-    if rating >= 99: rarity = "One"
-    elif rating >= 95: rarity = "Chase"
-    elif rating >= 90: rarity = "Drop"
-    elif rating >= 80: rarity = "Series"
-    else: rarity = "Stock"
+    # Твоя новая логика редкостей
+    if rating >= 5.0: rarity = "One"
+    elif 4.0 <= rating <= 4.5: rarity = "Chase"
+    elif 3.0 <= rating <= 3.5: rarity = "Drop"
+    elif 2.0 <= rating <= 2.5: rarity = "Series"
+    else: rarity = "Stock" # 0.5 - 1.5
     
     fid = (await state.get_data())['fid']
     await db.pool.execute("INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)", d[0], rating, d[2], d[3], rarity, fid)
-    await message.answer(f"✅ Карта добавлена!\n✨ Редкость определена как: {rarity}")
+    await message.answer(f"✅ Карта {d[0]} ({rating}) добавлена!\n✨ Редкость: {rarity}")
     await state.clear()
 
 # --- ТРЕЙД (БЕЗ ИЗМЕНЕНИЙ) ---
