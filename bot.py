@@ -19,17 +19,18 @@ TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = "@Miflcards"
 CHANNEL_URL = "https://t.me/Miflcards"
-ADMIN_IDS = [5185444605] # Впиши сюда свой ID
+ADMIN_IDS = [1866813859] # Впиши сюда свой ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Настройки редкостей и коэффициентов для Угадайки
 RARITY_CONFIG = {
-    "One": {"icon": "🟡", "price": 3500, "coef": 2.5},
-    "Chase": {"icon": "🟣", "price": 2800, "coef": 2.1},
-    "Drop": {"icon": "🔴", "price": 2000, "coef": 1.8},
-    "Series": {"icon": "🔵", "price": 1200, "coef": 1.5},
-    "Stock": {"icon": "🟢", "price": 500, "coef": 1.2}
+    "One": {"icon": "🟡", "name": "One", "price": 3500, "coef": 2.5, "reward": 10000},
+    "Chase": {"icon": "🟣", "name": "Chase", "price": 2800, "coef": 2.1, "reward": 5000},
+    "Drop": {"icon": "🔴", "name": "Drop", "price": 2000, "coef": 1.8, "reward": 2500},
+    "Series": {"icon": "🔵", "name": "Series", "price": 1200, "coef": 1.5, "reward": 1250},
+    "Stock": {"icon": "🟢", "name": "Stock", "price": 500, "coef": 1.2, "reward": 500}
 }
 
 class AddPlayer(StatesGroup):
@@ -68,6 +69,17 @@ def main_kb():
         [KeyboardButton(text="📊 ТОП-10")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def format_card_caption(card):
+    cfg = RARITY_CONFIG.get(card['rarity'], {"icon": "⚪", "reward": 0})
+    return (
+        f"👤 {card['name']}\n"
+        f"📊 Рейтинг: {card['rating']}\n"
+        f"🏢 Клуб: {card['club']}\n"
+        f"📍 Позиция: {card['position']}\n"
+        f"✨ Редкость: {cfg['icon']} {card['rarity']}\n"
+        f"💰 Награда: +{cfg['reward']} 🌟"
+    )
 
 # --- MIDDLEWARE ДЛЯ ПРОВЕРКИ ПОДПИСКИ ---
 @dp.message.middleware()
@@ -165,6 +177,7 @@ async def show_collection(callback: types.CallbackQuery, db: Database):
     if len(cards) == 5: nav.append(InlineKeyboardButton(text="➡️", callback_data=f"my_col_{page+1}"))
     await callback.message.edit_caption(caption=txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav] if nav else []))
 
+# --- ПАК ОПЕНИНГ (ПОЛУЧИТЬ КАРТУ) ---
 @dp.message(F.text == "🎁 Получить Карту")
 async def get_free_card(message: types.Message, db: Database, state: FSMContext):
     await state.clear()
@@ -176,9 +189,21 @@ async def get_free_card(message: types.Message, db: Database, state: FSMContext)
 
     card = await db.get_random_card()
     if not card: return await message.answer("База пуста!")
+    
+    # Анимация открытия
+    status_msg = await message.answer("📦 Открываем пак...")
+    await asyncio.sleep(1.2)
+    
+    cfg = RARITY_CONFIG.get(card['rarity'], {"icon": "⚪", "reward": 0})
+    await status_msg.edit_text(f"✨ Ого! Это КАРТА ТИПА {card['rarity']} {cfg['icon']}")
+    await asyncio.sleep(1.2)
+    
     await db.pool.execute("INSERT INTO inventory (user_id, card_id) VALUES ($1, $2)", message.from_user.id, card['card_id'])
+    await db.update_stars(message.from_user.id, cfg['reward'])
     await db.set_cooldown(message.from_user.id, 'last_drop')
-    await message.answer_photo(card['photo_id'], caption=f"🎁 Выпал: {card['name']} (⭐{card['rating']})")
+    
+    await message.answer_photo(card['photo_id'], caption=format_card_caption(card))
+    await status_msg.delete()
 
 @dp.message(F.text == "🛒 Магазин")
 async def shop(message: types.Message, state: FSMContext):
@@ -202,11 +227,14 @@ async def process_buy(callback: types.CallbackQuery, db: Database):
         if u['stars'] < price: return await callback.answer("Недостаточно звёзд!", show_alert=True)
         card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE rarity = $1 ORDER BY RANDOM() LIMIT 1", item)
         if not card: return await callback.answer("Нет карт такой редкости!", show_alert=True)
+        
         await db.update_stars(callback.from_user.id, -price)
         await db.pool.execute("INSERT INTO inventory (user_id, card_id) VALUES ($1, $2)", callback.from_user.id, card['card_id'])
-        await callback.message.answer_photo(card['photo_id'], caption=f"🛒 Куплен: {card['name']}")
+        
+        await callback.message.answer_photo(card['photo_id'], caption=f"🛒 Куплена карта:\n\n{format_card_caption(card)}")
     await callback.answer()
 
+# --- МИНИ-ИГРА УГАДАЙКА ---
 @dp.message(F.text == "⚽ Мини Игры")
 async def games_menu(message: types.Message, state: FSMContext):
     await state.clear()
@@ -237,21 +265,25 @@ async def guess_bet(message: types.Message, state: FSMContext, db: Database):
     
     kb = [[InlineKeyboardButton(text=o, callback_data=f"gans_{i}")] for i, o in enumerate(opts)]
     await db.update_stars(message.from_user.id, -bet)
-    await message.answer(f"🧩 КТО ЭТО?\n⭐ Рейтинг: {card['rating']}\n📍 Позиция: {card['position']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await message.answer(f"🧩 КТО ЭТО?\n⭐ Рейтинг: {card['rating']}\n📍 Позиция: {card['position']}\n🏢 Клуб: {card['club']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data.startswith("gans_"))
 async def guess_check(callback: types.CallbackQuery, state: FSMContext, db: Database):
     data = await state.get_data()
     if not data: return await callback.answer("Сессия истекла")
+    
     chosen = data['opts'][int(callback.data.split("_")[1])]
     card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE card_id = $1", data['cid'])
+    cfg = RARITY_CONFIG.get(card['rarity'], {"coef": 1.5})
     
     if chosen == data['correct']:
-        win = int(data['bet'] * RARITY_CONFIG.get(card['rarity'], {"coef": 1.5})['coef'])
+        win = int(data['bet'] * cfg['coef'])
         await db.update_stars(callback.from_user.id, win)
-        await callback.message.answer(f"✅ Верно! +{win} 🌟")
+        res_text = f"✅ Верно! Это был {card['name']}.\nТвой выигрыш: {win} 🌟 (x{cfg['coef']})"
     else:
-        await callback.message.answer(f"❌ Это был {data['correct']}")
+        res_text = f"❌ Неверно! Это был {card['name']}."
+    
+    await callback.message.answer_photo(card['photo_id'], caption=f"{res_text}\n\n{format_card_caption(card)}")
     await state.clear()
     await callback.message.delete()
 
