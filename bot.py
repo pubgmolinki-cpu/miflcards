@@ -19,7 +19,7 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = "@Miflcards"
-ADMIN_IDS = [5185444605]
+ADMIN_IDS = [1866813859]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
