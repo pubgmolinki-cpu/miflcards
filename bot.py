@@ -4,6 +4,7 @@ import random
 import string
 import asyncpg
 import logging
+from io import BytesIO
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandObject
@@ -25,7 +26,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Импорт функции генерации (предполагаем, что файл profile_generator.py в той же папке)
 try:
     from profile_generator import generate_profile_image
 except ImportError:
@@ -92,7 +92,7 @@ class Database:
     async def get_random_card(self):
         return await self.pool.fetchrow("SELECT * FROM mifl_cards ORDER BY RANDOM() LIMIT 1")
 
-# --- СТАРТ И РЕФЕРАЛЫ ---
+# --- СИСТЕМА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, command: CommandObject, db: Database):
     await state.clear()
@@ -113,28 +113,19 @@ async def cmd_start(message: types.Message, state: FSMContext, command: CommandO
     user = await db.pool.fetchrow("SELECT * FROM users WHERE user_id = $1", message.from_user.id)
     await message.answer(f"⚽ Привет, {user['username']}! Добро пожаловать в <b>Mifl Cards</b>.", reply_markup=main_kb(), parse_mode="HTML")
 
-@dp.message(F.text == "👥 Рефералы")
-async def refs_menu(message: types.Message, state: FSMContext):
-    await state.clear()
-    bot_info = await bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
-    await message.answer(f"👥 <b>Реферальная программа</b>\n\nБонус 5 000 🌟 за каждого приглашенного друга!\n\nТвоя ссылка:\n<code>{link}</code>", parse_mode="HTML")
-
 async def check_subscription(user_id):
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ["member", "administrator", "creator"]
-    except:
-        return False
+    except: return False
 
 @dp.callback_query(F.data == "check_subs")
-async def verify_sub_callback(call: types.CallbackQuery, state: FSMContext, db: Database):
+async def verify_sub_callback(call: types.CallbackQuery, db: Database):
     if await check_subscription(call.from_user.id):
         await call.message.delete()
         user = await db.get_user(call.from_user.id)
         await call.message.answer(f"⚽ Привет, {user['username']}! Добро пожаловать в <b>Mifl Cards</b>.", reply_markup=main_kb(), parse_mode="HTML")
-    else:
-        await call.answer("❌ Ты всё еще не подписан!", show_alert=True)
+    else: await call.answer("❌ Ты всё еще не подписан!", show_alert=True)
 
 # --- ПРОФИЛЬ ---
 @dp.message(F.text == "👤 Профиль")
@@ -163,14 +154,16 @@ async def view_profile(message: types.Message, state: FSMContext, db: Database):
         photos = await bot.get_user_profile_photos(message.from_user.id, limit=1)
         if photos.total_count > 0:
             file = await bot.get_file(photos.photos[0][-1].file_id)
-            downloaded = await bot.download_file(file.file_path)
+            # Aiogram 3.x download
+            downloaded = await bot.download(file)
             avatar_bytes = downloaded.read()
 
         img_io = await generate_profile_image(avatar_bytes, u['username'], u['stars'], cnt, st_text, color=st_color)
         if img_io:
+            img_io.seek(0) # Сброс указателя
             return await message.answer_photo(BufferedInputFile(img_io.read(), filename="profile.png"), caption=caption, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Profile image error: {e}")
+        logging.error(f"Profile photo error: {e}")
     
     await message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
@@ -187,23 +180,19 @@ async def view_collection(callback: types.CallbackQuery, db: Database):
     for c in cards:
         text += f"{RARITY_CONFIG.get(c['rarity'], {}).get('icon', '⚪')} {c['name']} ({c['rarity']})\n"
     
-    nav = []
-    if page > 0: nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"view_col_{page-1}"))
+    nav = [InlineKeyboardButton(text="⬅️", callback_data=f"view_col_{page-1}")] if page > 0 else []
     if len(cards) == 10: nav.append(InlineKeyboardButton(text="➡️", callback_data=f"view_col_{page+1}"))
     
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav]), parse_mode="HTML")
     await callback.answer()
 
-# --- ОТКРЫТИЕ ПАКОВ ---
+# --- МЕХАНИКИ ПАКОВ ---
 async def animate_pack_opening(chat_id, card, reward_text=""):
     msg = await bot.send_message(chat_id, "Открываем Пак 📦...")
-    await asyncio.sleep(random.randint(3, 5))
-    await msg.edit_text(f"Открываем Пак 📦...\nРейтинг: {card['rating']}")
-    await asyncio.sleep(2)
-    await msg.edit_text(f"Открываем Пак 📦...\nРейтинг: {card['rating']}\nПозиция: {card['position']}")
-    await asyncio.sleep(2)
-    await msg.edit_text(f"Открываем Пак 📦...\nРейтинг: {card['rating']}\nПозиция: {card['position']}\nКлуб: {card['club']}")
-    await asyncio.sleep(2)
+    await asyncio.sleep(random.randint(3, 4))
+    for step in [f"Рейтинг: {card['rating']}", f"Рейтинг: {card['rating']}\nПозиция: {card['position']}", f"Рейтинг: {card['rating']}\nПозиция: {card['position']}\nКлуб: {card['club']}"]:
+        await msg.edit_text(f"Открываем Пак 📦...\n{step}")
+        await asyncio.sleep(1.5)
     await msg.delete()
     
     cfg = RARITY_CONFIG.get(card['rarity'], {"icon": "⚪"})
@@ -211,10 +200,8 @@ async def animate_pack_opening(chat_id, card, reward_text=""):
     if reward_text: cap += f"\n\n{reward_text}"
     await bot.send_photo(chat_id, photo=card['photo_id'], caption=cap)
 
-# --- ПОЛУЧИТЬ КАРТУ ---
 @dp.message(F.text == "🎁 Получить Карту")
-async def get_free_card(message: types.Message, state: FSMContext, db: Database):
-    await state.clear()
+async def get_free_card(message: types.Message, db: Database):
     u = await db.get_user(message.from_user.id)
     cd = 2 if (u.get('vip_until') and u['vip_until'] > datetime.now()) else 4
     if u.get('last_drop') and datetime.now() < u['last_drop'] + timedelta(hours=cd):
@@ -237,10 +224,9 @@ async def get_free_card(message: types.Message, state: FSMContext, db: Database)
         await db.update_stars(message.from_user.id, cfg['reward'])
         await animate_pack_opening(message.chat.id, card, f"🎊 Новая карта! +{cfg['reward']} 🌟")
 
-# --- МАГАЗИН ---
+# --- МАГАЗИН И БОНУС ---
 @dp.message(F.text == "🛒 Магазин")
-async def shop_menu(message: types.Message, state: FSMContext):
-    await state.clear()
+async def shop_menu(message: types.Message):
     kb = [[InlineKeyboardButton(text=f"Пак {r} — {v['price']} 🌟", callback_data=f"buy_{r}")] for r, v in RARITY_CONFIG.items()]
     kb.append([InlineKeyboardButton(text="💎 VIP Статус (1 день) — 15000 🌟", callback_data="buy_VIP")])
     await message.answer("🛒 <b>Магазин</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
@@ -254,31 +240,25 @@ async def process_buy(call: types.CallbackQuery, db: Database):
         if u['stars'] < 15000: return await call.answer("Недостаточно звезд!", show_alert=True)
         new_date = (u['vip_until'] if u['vip_until'] and u['vip_until'] > datetime.now() else datetime.now()) + timedelta(days=1)
         await db.pool.execute("UPDATE users SET stars = stars - 15000, vip_until = $1 WHERE user_id = $2", new_date, call.from_user.id)
-        await call.message.answer("💎 Вы успешно приобрели VIP статус на 1 день!")
-        return await call.answer()
+        return await call.message.answer("💎 VIP успешно приобретен!")
 
-    rarity = choice
-    if u['stars'] < RARITY_CONFIG[rarity]['price']: return await call.answer("Недостаточно звезд!", show_alert=True)
-    card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE rarity = $1 ORDER BY RANDOM() LIMIT 1", rarity)
-    if not card: return await call.answer("Карт такой редкости нет.", show_alert=True)
+    if u['stars'] < RARITY_CONFIG[choice]['price']: return await call.answer("Недостаточно звезд!", show_alert=True)
+    card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE rarity = $1 ORDER BY RANDOM() LIMIT 1", choice)
+    if not card: return await call.answer("Карт нет.", show_alert=True)
     
-    await db.update_stars(call.from_user.id, -RARITY_CONFIG[rarity]['price'])
+    await db.update_stars(call.from_user.id, -RARITY_CONFIG[choice]['price'])
     await db.pool.execute("INSERT INTO inventory (user_id, card_id) VALUES ($1, $2)", call.from_user.id, card['card_id'])
     await call.message.delete()
     await animate_pack_opening(call.message.chat.id, card, "🛍 Покупка в магазине!")
-    await call.answer()
 
-# --- БОНУС ---
 @dp.message(F.text == "📅 Бонус")
-async def cmd_bonus(message: types.Message, state: FSMContext, db: Database):
-    await state.clear()
+async def cmd_bonus(message: types.Message, db: Database):
     u = await db.get_user(message.from_user.id)
     if u.get('last_bonus') and datetime.now() < u['last_bonus'] + timedelta(hours=24):
         diff = (u['last_bonus'] + timedelta(hours=24)) - datetime.now()
-        return await message.answer(f"⏳ Следующий бонус через {diff.seconds // 3600}ч.")
+        return await message.answer(f"⏳ Бонус через {diff.seconds // 3600}ч.")
     
-    chance = random.random()
-    if chance < 0.10: 
+    if random.random() < 0.10: 
         val = random.randint(6000, 15000)
         txt = f"Сегодня у вас «Удачливый День 🤑».\n\nВаш бонус: {val} ⭐"
     else:
@@ -289,28 +269,24 @@ async def cmd_bonus(message: types.Message, state: FSMContext, db: Database):
     await db.pool.execute("UPDATE users SET last_bonus = $1 WHERE user_id = $2", datetime.now(), message.from_user.id)
     await message.answer(txt)
 
-# --- УГАДАЙКА ---
+# --- МИНИ-ИГРЫ ---
 @dp.message(F.text == "⚽ Мини Игры")
-async def games_menu(message: types.Message, state: FSMContext):
-    await state.clear()
+async def games_menu(message: types.Message):
     await message.answer("⚽ Выбери игру:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧩 Угадай Игрока", callback_data="start_guess")]]))
 
 @dp.callback_query(F.data == "start_guess")
 async def guess_bet_step(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("💰 Введите ставку для игры (мин. 100, макс. 20000 🌟):")
+    await callback.message.answer("💰 Введите ставку (100 - 20000 🌟):")
     await state.set_state(Form.guess_bet)
 
 @dp.message(Form.guess_bet)
 async def guess_logic(message: types.Message, state: FSMContext, db: Database):
     if not message.text.isdigit(): return
-    bet = int(message.text)
-    if bet > 20000: return await message.answer("❌ Максимальная ставка — 20 000 🌟!")
-    u = await db.get_user(message.from_user.id)
-    if bet < 100 or bet > u['stars']: return await message.answer("❌ Недостаточно средств.")
+    bet, u = int(message.text), await db.get_user(message.from_user.id)
+    if bet < 100 or bet > 20000 or bet > u['stars']: return await message.answer("❌ Неверная ставка.")
     
     card = await db.get_random_card()
-    if not card: return await message.answer("База карт пуста.")
-    
+    if not card: return
     others = await db.pool.fetch("SELECT name FROM mifl_cards WHERE name != $1 ORDER BY RANDOM() LIMIT 3", card['name'])
     opts = [card['name']] + [r['name'] for r in others]
     random.shuffle(opts)
@@ -318,88 +294,60 @@ async def guess_logic(message: types.Message, state: FSMContext, db: Database):
     await db.update_stars(message.from_user.id, -bet)
     await state.update_data(correct=card['name'], bet=bet, rating=card['rating'], opts=opts, cid=card['card_id'])
     
-    kb = [
-        [InlineKeyboardButton(text=opts[0], callback_data="ans_0"), InlineKeyboardButton(text=opts[1], callback_data="ans_1")],
-        [InlineKeyboardButton(text=opts[2], callback_data="ans_2"), InlineKeyboardButton(text=opts[3], callback_data="ans_3")],
-        [InlineKeyboardButton(text="💡 Подсказка", callback_data="hint"), InlineKeyboardButton(text="🏳 Сдаться", callback_data="surrender")]
-    ]
+    kb = [[InlineKeyboardButton(text=opts[0], callback_data="ans_0"), InlineKeyboardButton(text=opts[1], callback_data="ans_1")],
+          [InlineKeyboardButton(text=opts[2], callback_data="ans_2"), InlineKeyboardButton(text=opts[3], callback_data="ans_3")],
+          [InlineKeyboardButton(text="💡 Подсказка", callback_data="hint"), InlineKeyboardButton(text="🏳 Сдаться", callback_data="surrender")]]
     
-    msg = await message.answer(f"🧩 <b>Угадай игрока! (60 сек)</b>\n\n🛡 Клуб: {card['club']}\n📍 Позиция: {card['position']}\n💰 Ставка: {bet} 🌟", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+    await message.answer(f"🧩 <b>Угадай игрока!</b>\n🛡 Клуб: {card['club']}\n📍 Поз: {card['position']}\n💰 Ставка: {bet} 🌟", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
     await state.set_state(Form.guess_playing)
-    asyncio.create_task(game_timer(msg, state))
 
-async def game_timer(msg: types.Message, state: FSMContext):
-    await asyncio.sleep(60)
-    if await state.get_state() == Form.guess_playing:
-        try:
-            await msg.delete()
-            await msg.answer("⏰ Время вышло! Ставка сгорела.")
-        except: pass
-        await state.clear()
+@dp.callback_query(F.data.startswith("ans_"), Form.guess_playing)
+async def check_ans(call: types.CallbackQuery, state: FSMContext, db: Database):
+    idx, data = int(call.data.split("_")[1]), await state.get_data()
+    card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE card_id = $1", data['cid'])
+    await call.message.delete()
+    if data['opts'][idx] == data['correct']:
+        await db.update_stars(call.from_user.id, data['bet']*2)
+        txt = f"🎉 <b>ПОБЕДА!</b> Это <b>{data['correct']}</b>! +{data['bet']*2} 🌟"
+    else: txt = f"💥 <b>ПРОИГРЫШ.</b> Это был <b>{data['correct']}</b>."
+    await call.message.answer_photo(card['photo_id'], caption=txt, parse_mode="HTML")
+    await state.clear()
 
 @dp.callback_query(F.data == "hint", Form.guess_playing)
 async def guess_hint(call: types.CallbackQuery, state: FSMContext, db: Database):
     data = await state.get_data()
-    cost = int(data['bet'] * 0.2)
-    await db.update_stars(call.from_user.id, -cost)
-    await call.answer(f"Подсказка: Рейтинг {data['rating']} (-{cost} 🌟)", show_alert=True)
+    await db.update_stars(call.from_user.id, -int(data['bet']*0.2))
+    await call.answer(f"Рейтинг: {data['rating']}", show_alert=True)
 
 @dp.callback_query(F.data == "surrender", Form.guess_playing)
-async def guess_give_up(call: types.CallbackQuery, state: FSMContext, db: Database):
-    data = await state.get_data()
-    card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE card_id = $1", data['cid'])
+async def guess_give_up(call: types.CallbackQuery, state: FSMContext):
     await call.message.delete()
-    txt = f"🏳 <b>ВЫ СДАЛИСЬ</b>\n\nВы решили не рисковать. Это был <b>{data['correct']}</b>.\n💸 Потеряно: {data['bet']} 🌟"
-    await call.message.answer_photo(card['photo_id'], caption=txt, parse_mode="HTML")
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("ans_"), Form.guess_playing)
-async def check_ans(call: types.CallbackQuery, state: FSMContext, db: Database):
-    idx = int(call.data.split("_")[1])
-    data = await state.get_data()
-    card = await db.pool.fetchrow("SELECT * FROM mifl_cards WHERE card_id = $1", data['cid'])
-    await call.message.delete()
-    if data['opts'][idx] == data['correct']:
-        win = data['bet'] * 2
-        await db.update_stars(call.from_user.id, win)
-        txt = f"🎉 <b>ПОБЕДА!</b>\n\nЭто действительно <b>{data['correct']}</b>!\n💰 Выиграно: {win} 🌟!"
-    else:
-        txt = f"💥 <b>ПОРАЖЕНИЕ...</b>\n\nПравильный ответ: <b>{data['correct']}</b>.\n💸 Потеряно: {data['bet']} 🌟"
-    await call.message.answer_photo(card['photo_id'], caption=txt, parse_mode="HTML")
+    await call.message.answer("🏳 Вы сдались.")
     await state.clear()
 
 # --- ПРОМОКОДЫ ---
 @dp.message(F.text == "🏷 Промокод")
 async def promo_start(message: types.Message, state: FSMContext):
     await state.set_state(Form.promo_input)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_promo")]])
-    await message.answer("🏷 Введи промокод:", reply_markup=kb)
+    await message.answer("🏷 Введи код:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_promo")]]))
 
 @dp.callback_query(F.data == "cancel_promo")
 async def cancel_promo(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("❌ Ввод промокода отменен.")
+    await call.message.edit_text("❌ Отменено.")
 
 @dp.message(Form.promo_input)
 async def promo_use(message: types.Message, state: FSMContext, db: Database):
     code = message.text.strip().upper()
     promo = await db.pool.fetchrow("SELECT * FROM promocodes WHERE code = $1", code)
-    if not promo or promo['current_uses'] >= promo['max_uses']: return await message.answer("❌ Неверный или истекший код.")
-    used = await db.pool.fetchval("SELECT 1 FROM used_promos WHERE user_id = $1 AND code = $2", message.from_user.id, code)
-    if used: return await message.answer("❌ Вы уже активировали этот код.")
+    if not promo or promo['current_uses'] >= promo['max_uses']: return await message.answer("❌ Код недействителен.")
+    if await db.pool.fetchval("SELECT 1 FROM used_promos WHERE user_id = $1 AND code = $2", message.from_user.id, code): return await message.answer("❌ Уже использован.")
+    
     await db.pool.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code = $1", code)
     await db.pool.execute("INSERT INTO used_promos (user_id, code) VALUES ($1, $2)", message.from_user.id, code)
     await db.update_stars(message.from_user.id, promo['stars'])
-    await message.answer(f"✅ Промокод активирован! +{promo['stars']} 🌟")
+    await message.answer(f"✅ Активировано! +{promo['stars']} 🌟")
     await state.clear()
-
-# --- ТОП ---
-@dp.message(F.text == "📊 ТОП-10")
-async def leaderboard(message: types.Message, state: FSMContext, db: Database):
-    await state.clear()
-    rows = await db.pool.fetch("SELECT username, stars FROM users ORDER BY stars DESC LIMIT 10")
-    txt = "🏆 <b>ТОП-10 ИГРОКОВ:</b>\n\n" + "\n".join([f"{i+1}. {r['username']} — {r['stars']:,} 🌟" for i, r in enumerate(rows)])
-    await message.answer(txt, parse_mode="HTML")
 
 # --- АДМИНКА ---
 @dp.message(Command("add_promo"), F.from_user.id.in_(ADMIN_IDS))
@@ -407,85 +355,80 @@ async def adm_promo(message: types.Message, command: CommandObject, db: Database
     try:
         code, stars, uses = command.args.split()
         await db.pool.execute("INSERT INTO promocodes (code, stars, max_uses) VALUES ($1, $2, $3)", code.upper(), int(stars), int(uses))
-        await message.answer(f"✅ Промокод {code.upper()} на {stars} 🌟 создан!")
-    except: await message.answer("❌ Формат: /add_promo КОД ЗВЕЗДЫ ЛИМИТ")
+        await message.answer(f"✅ Код {code.upper()} создан!")
+    except: await message.answer("Формат: /add_promo КОД ЗВЕЗДЫ ЛИМИТ")
 
 @dp.message(Command("clear_cards"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_clear(message: types.Message, db: Database):
     await db.pool.execute("TRUNCATE TABLE mifl_cards CASCADE")
-    await message.answer("⚠️ Все карты удалены из базы!")
+    await message.answer("⚠️ База карт очищена!")
 
 @dp.message(Command("add_player"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_add_p(message: types.Message, state: FSMContext):
-    await message.answer("Отправь фото игрока:")
+    await message.answer("Отправь фото:")
     await state.set_state(Form.add_player_photo)
 
 @dp.message(Form.add_player_photo, F.photo)
 async def adm_p_photo(message: types.Message, state: FSMContext):
     await state.update_data(fid=message.photo[-1].file_id)
-    await message.answer("Введи данные через запятую:\n(Имя, Рейтинг, Клуб, Позиция)")
+    await message.answer("Имя, Рейтинг, Клуб, Позиция")
     await state.set_state(Form.add_player_data)
 
 @dp.message(Form.add_player_data)
 async def adm_p_save(message: types.Message, state: FSMContext, db: Database):
     d = [x.strip() for x in message.text.split(",")]
     rating = float(d[1])
-    
-    # Твоя новая логика редкостей
-    if rating >= 5.0: rarity = "One"
-    elif 4.0 <= rating <= 4.5: rarity = "Chase"
-    elif 3.0 <= rating <= 3.5: rarity = "Drop"
-    elif 2.0 <= rating <= 2.5: rarity = "Series"
-    else: rarity = "Stock" # 0.5 - 1.5
+    if rating >= 5.0: r = "One"
+    elif 4.0 <= rating <= 4.5: r = "Chase"
+    elif 3.0 <= rating <= 3.5: r = "Drop"
+    elif 2.0 <= rating <= 2.5: r = "Series"
+    else: r = "Stock"
     
     fid = (await state.get_data())['fid']
-    await db.pool.execute("INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)", d[0], rating, d[2], d[3], rarity, fid)
-    await message.answer(f"✅ Карта {d[0]} ({rating}) добавлена!\n✨ Редкость: {rarity}")
+    await db.pool.execute("INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)", d[0], rating, d[2], d[3], r, fid)
+    await message.answer(f"✅ Добавлен! Редкость: {r}")
     await state.clear()
 
-# --- ТРЕЙД (БЕЗ ИЗМЕНЕНИЙ) ---
+# --- ОБМЕН (ТРЕЙД) ---
 @dp.message(F.text == "🔄 Трейд")
-async def trade_init(message: types.Message, state: FSMContext):
-    await state.clear()
-    kb = [[InlineKeyboardButton(text="📤 Создать код", callback_data="tr_create")], [InlineKeyboardButton(text="📥 Ввести код", callback_data="tr_join")]]
-    await message.answer("🔄 ОБМЕН КАРТАМИ", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+async def trade_init(message: types.Message):
+    kb = [[InlineKeyboardButton(text="📤 Создать", callback_data="tr_create")], [InlineKeyboardButton(text="📥 Ввести", callback_data="tr_join")]]
+    await message.answer("🔄 ОБМЕН", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data == "tr_create")
 async def tr_create_pg(call: types.CallbackQuery, db: Database):
     cards = await db.pool.fetch("SELECT c.* FROM mifl_cards c JOIN inventory i ON c.card_id = i.card_id WHERE i.user_id = $1 LIMIT 5", call.from_user.id)
     if not cards: return await call.answer("Нет карт!", show_alert=True)
-    kb = [[InlineKeyboardButton(text=f"{c['name']}", callback_data=f"trgen_{c['card_id']}")] for c in cards]
+    kb = [[InlineKeyboardButton(text=c['name'], callback_data=f"trgen_{c['card_id']}")] for c in cards]
     await call.message.edit_text("Выбери карту:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data.startswith("trgen_"))
 async def tr_gen_final(call: types.CallbackQuery, db: Database):
-    cid = int(call.data.split("_")[1])
     code = "TRD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
-    await db.pool.execute("INSERT INTO active_trades (code, user_a, card_a) VALUES ($1, $2, $3)", code, call.from_user.id, cid)
-    await call.message.edit_text(f"✅ Код обмена: `{code}`", parse_mode="Markdown")
+    await db.pool.execute("INSERT INTO active_trades (code, user_a, card_a) VALUES ($1, $2, $3)", code, call.from_user.id, int(call.data.split("_")[1]))
+    await call.message.edit_text(f"✅ Код: `{code}`", parse_mode="Markdown")
 
 @dp.callback_query(F.data == "tr_join")
 async def tr_join_input(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("📥 Введи код обмена:")
+    await call.message.answer("Введи код:")
     await state.set_state(Form.trade_input)
 
 @dp.message(Form.trade_input)
 async def tr_join_logic(message: types.Message, state: FSMContext, db: Database):
-    code = message.text.strip().upper()
-    tr = await db.pool.fetchrow("SELECT * FROM active_trades WHERE code = $1", code)
-    if not tr or tr['user_a'] == message.from_user.id: return await message.answer("❌ Ошибка.")
-    await state.update_data(tr_code=code)
+    tr = await db.pool.fetchrow("SELECT * FROM active_trades WHERE code = $1", message.text.strip().upper())
+    if not tr or tr['user_a'] == message.from_user.id: return await message.answer("Ошибка.")
+    await state.update_data(tr_code=tr['code'])
     cards = await db.pool.fetch("SELECT c.* FROM mifl_cards c JOIN inventory i ON c.card_id = i.card_id WHERE i.user_id = $1 LIMIT 5", message.from_user.id)
     kb = [[InlineKeyboardButton(text=f"Дать: {c['name']}", callback_data=f"troff_{c['card_id']}")] for c in cards]
-    await message.answer("Что предложишь взамен?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await message.answer("Твоё предложение?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data.startswith("troff_"))
 async def tr_send_to_a(call: types.CallbackQuery, state: FSMContext, db: Database):
-    cb_id, code = int(call.data.split("_")[1]), (await state.get_data())['tr_code']
-    tr = await db.pool.fetchrow("SELECT * FROM active_trades WHERE code = $1", code)
-    kb = [[InlineKeyboardButton(text="✅ ПРИНЯТЬ", callback_data=f"trapp_{code}_{cb_id}_{call.from_user.id}")]]
-    await bot.send_message(tr['user_a'], f"🔄 Запрос обмена по коду {code}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await call.message.edit_text("⏳ Ожидание ответа...")
+    data = await state.get_data()
+    tr = await db.pool.fetchrow("SELECT * FROM active_trades WHERE code = $1", data['tr_code'])
+    kb = [[InlineKeyboardButton(text="✅ ПРИНЯТЬ", callback_data=f"trapp_{tr['code']}_{call.data.split('_')[1]}_{call.from_user.id}")]]
+    await bot.send_message(tr['user_a'], f"🔄 Запрос обмена {tr['code']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.edit_text("⏳ Ждем ответа...")
     await state.clear()
 
 @dp.callback_query(F.data.startswith("trapp_"))
@@ -500,11 +443,10 @@ async def tr_accept(call: types.CallbackQuery, db: Database):
         await call.message.edit_text("✅ Обмен завершен!")
         await bot.send_message(int(ub_id), "✅ Обмен принят!")
 
-# --- СЕРВЕР ---
-async def handle(r): return web.Response(text="Mifl Cards")
+# --- СТАРТ ---
 async def start_srv():
     app = web.Application()
-    app.router.add_get("/", handle)
+    app.router.add_get("/", lambda r: web.Response(text="Mifl"))
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080))).start()
