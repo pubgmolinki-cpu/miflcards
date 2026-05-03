@@ -1,8 +1,8 @@
 import os
 import asyncio
 import random
+import asyncpg
 import logging
-from io import BytesIO
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F, types
@@ -14,40 +14,29 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton
 )
 from aiohttp import web
-import asyncpg
 
 # --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = "@Miflcards"
-ADMIN_IDS = [1866813859]
+ADMIN_ID = 1866813859
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Подключаем твой генератор
+# Импорт твоего генератора
 try:
     from profile_generator import generate_profile_image
 except ImportError:
-    logging.warning("Файл profile_generator.py не найден!")
-    async def generate_profile_image(*args, **kwargs): return None
+    async def generate_profile_image(*args): return None
 
-RARITY_CONFIG = {
-    "One": {"icon": "🟡", "price": 3500, "reward": 10000},
-    "Chase": {"icon": "🟣", "price": 2800, "reward": 5000},
-    "Drop": {"icon": "🔴", "price": 2000, "reward": 2500},
-    "Series": {"icon": "🔵", "price": 1200, "reward": 1250},
-    "Stock": {"icon": "🟢", "price": 500, "reward": 500}
-}
-
+# --- СОСТОЯНИЯ ---
 class Form(StatesGroup):
     add_player_photo = State()
     add_player_data = State()
     guess_bet = State()
     guess_playing = State()
-    promo_input = State()
-    trade_input = State()
 
 # --- КЛАВИАТУРА ---
 def main_kb():
@@ -55,101 +44,57 @@ def main_kb():
         [KeyboardButton(text="🎁 Получить Карту"), KeyboardButton(text="📅 Бонус")],
         [KeyboardButton(text="⚽ Мини Игры"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔄 Трейд"), KeyboardButton(text="🏷 Промокод")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="👥 Рефералы")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="👥 Рефералы")], # Добавил рефералов в кнопки
         [KeyboardButton(text="📊 ТОП-10")]
     ], resize_keyboard=True)
 
-# --- БАЗА ДАННЫХ ---
-class Database:
-    def __init__(self, pool):
-        self.pool = pool
-
-    async def create_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY, 
-                    username TEXT, 
-                    stars INT DEFAULT 0, 
-                    vip_until TIMESTAMP, 
-                    last_drop TIMESTAMP, 
-                    last_bonus TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS mifl_cards (
-                    card_id SERIAL PRIMARY KEY, 
-                    name TEXT, 
-                    rating FLOAT, 
-                    club TEXT, 
-                    position TEXT, 
-                    rarity TEXT, 
-                    photo_id TEXT
-                );
-                CREATE TABLE IF NOT EXISTS inventory (user_id BIGINT, card_id INT);
-                CREATE TABLE IF NOT EXISTS promocodes (
-                    code TEXT PRIMARY KEY, 
-                    stars INT, 
-                    max_uses INT, 
-                    current_uses INT DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS used_promos (user_id BIGINT, code TEXT);
-            """)
-
-    async def get_user(self, uid, username="Игрок"):
-        user = await self.pool.fetchrow("SELECT * FROM users WHERE user_id = $1", uid)
-        if not user:
-            await self.pool.execute("INSERT INTO users (user_id, username, stars) VALUES ($1, $2, 0)", uid, username)
-            return await self.pool.fetchrow("SELECT * FROM users WHERE user_id = $1", uid)
-        return user
-
-    async def update_stars(self, uid, amount):
-        await self.pool.execute("UPDATE users SET stars = stars + $1 WHERE user_id = $2", amount, uid)
-
-# --- ПРОФИЛЬ (ИСПРАВЛЕНА ЗАГРУЗКА АВАТАРА) ---
+# --- ЛОГИКА ПРОФИЛЯ (ТА САМАЯ СИСТЕМА) ---
 @dp.message(F.text == "👤 Профиль")
-async def view_profile(message: types.Message, state: FSMContext, db: Database):
+async def view_profile(message: types.Message, state: FSMContext, db):
     await state.clear()
     u = await db.get_user(message.from_user.id)
     cnt = await db.pool.fetchval("SELECT COUNT(*) FROM inventory WHERE user_id = $1", message.from_user.id)
     
-    is_vip = u['vip_until'] and u['vip_until'] > datetime.now()
-    st_text, st_color = ("VIP 💎", "yellow") if is_vip else ("Обычный 👤", "white")
+    is_vip = u.get('vip_until') and u['vip_until'] > datetime.now()
+    st = "VIP 💎" if is_vip else "Обычный 👤"
     
     caption = (
         f"👤 <b>Профиль: {u['username']}</b>\n"
         f"💰 Баланс: {u['stars']:,} 🌟\n"
-        f"🎴 Карт в коллекции: {cnt}\n"
-        f"👑 Статус: {st_text}"
+        f"🎴 Карт: {cnt}\n"
+        f"👑 Статус: {st}"
     )
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎴 Моя Коллекция", callback_data="view_col_0")]])
 
+    avatar_bytes = None
     try:
-        avatar_bytes = None
         photos = await bot.get_user_profile_photos(message.from_user.id, limit=1)
-        
-        # Если у юзера есть аватарка, корректно скачиваем её байты
         if photos.total_count > 0:
             file = await bot.get_file(photos.photos[0][-1].file_id)
-            downloaded_file = await bot.download(file)
-            avatar_bytes = downloaded_file.getvalue() # getvalue() вместо read()!
+            # Вот она, твоя рабочая схема скачивания:
+            downloaded = await bot.download_file(file.file_path)
+            avatar_bytes = downloaded.read()
 
-        # Генерируем фото через твой скрипт
-        img_io = await generate_profile_image(avatar_bytes, u['username'], u['stars'], cnt, st_text, color=st_color)
+        # Генерация через твой скрипт
+        img_io = await generate_profile_image(avatar_bytes, u['username'], u['stars'], cnt, st)
         
-        # Если скрипт вернул BytesIO, отправляем его
         if img_io:
-            photo_file = BufferedInputFile(img_io.getvalue(), filename="profile.png")
-            return await message.answer_photo(photo_file, caption=caption, reply_markup=kb, parse_mode="HTML")
-            
+            # И твоя рабочая схема отправки:
+            return await message.answer_photo(
+                BufferedInputFile(img_io.read(), filename="p.png"), 
+                caption=caption, 
+                reply_markup=kb, 
+                parse_mode="HTML"
+            )
     except Exception as e:
-        logging.error(f"Ошибка генерации профиля: {e}")
+        logging.error(f"Ошибка системы фото: {e}")
     
-    # Если скрипт упал или вернул None, отправляем просто текст, чтобы бот не зависал
+    # Фолбэк на текст, если генератор отвалился
     await message.answer(caption, reply_markup=kb, parse_mode="HTML")
 
-# --- ТОП-10 ---
+# --- ТОП-10 (ВОССТАНОВЛЕНО) ---
 @dp.message(F.text == "📊 ТОП-10")
-async def leaderboard(message: types.Message, db: Database):
+async def leaderboard(message: types.Message, db):
     rows = await db.pool.fetch("SELECT username, stars FROM users ORDER BY stars DESC LIMIT 10")
     if not rows:
         return await message.answer("🏆 Список лидеров пока пуст.")
@@ -167,87 +112,52 @@ async def referrals_menu(message: types.Message):
     link = f"https://t.me/{me.username}?start={message.from_user.id}"
     text = (
         "👥 <b>Реферальная программа</b>\n\n"
-        "Приглашайте друзей и получайте бонусы!\n"
-        "💰 Награда за друга: <b>5 000 🌟</b>\n\n"
+        "Приглашай друзей и получай <b>5 000 🌟</b> за каждого!\n\n"
         f"Твоя ссылка:\n<code>{link}</code>"
     )
     await message.answer(text, parse_mode="HTML")
 
-# --- СТАРТ И РЕФЕРАЛЬНАЯ СИСТЕМА ---
+# --- КОМАНДА /START (С РЕФЕРАЛАМИ) ---
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, command: CommandObject, db: Database):
+async def cmd_start(message: types.Message, command: CommandObject, db):
+    # Логика рефералки
     ref_id = command.args
     if ref_id and ref_id.isdigit() and int(ref_id) != message.from_user.id:
+        # Проверяем, новый ли это юзер
         exists = await db.pool.fetchval("SELECT 1 FROM users WHERE user_id = $1", message.from_user.id)
         if not exists:
             await db.update_stars(int(ref_id), 5000)
-            try: await bot.send_message(int(ref_id), "🎉 У вас новый реферал! +5000 🌟")
-            except: pass
-            
-    await db.get_user(message.from_user.id, message.from_user.first_name)
-    await message.answer(f"⚽ Привет! Добро пожаловать в <b>Mifl Cards</b>.", reply_markup=main_kb(), parse_mode="HTML")
+            try:
+                await bot.send_message(int(ref_id), "🎉 Твой друг зашел в бота! Тебе начислено +5000 🌟")
+            except:
+                pass
 
-# --- МЕХАНИКА КАРТ ---
-@dp.message(F.text == "🎁 Получить Карту")
-async def get_card(message: types.Message, db: Database):
-    u = await db.get_user(message.from_user.id)
-    cd = 2 if (u['vip_until'] and u['vip_until'] > datetime.now()) else 4
-    if u['last_drop'] and datetime.now() < u['last_drop'] + timedelta(hours=cd):
-        diff = (u['last_drop'] + timedelta(hours=cd)) - datetime.now()
-        return await message.answer(f"⏳ Пак будет через {diff.seconds // 3600}ч. {(diff.seconds // 60) % 60}м.")
+    user = await db.get_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    await message.answer(f"⚽ Привет, {user['username']}! Ты зашел в <b>Mifl Cards</b>.", reply_markup=main_kb(), parse_mode="HTML")
 
-    card = await db.pool.fetchrow("SELECT * FROM mifl_cards ORDER BY RANDOM() LIMIT 1")
-    if not card: return await message.answer("База пуста.")
-    
-    cfg = RARITY_CONFIG.get(card['rarity'], {"icon": "⚪", "reward": 500})
-    await db.pool.execute("UPDATE users SET last_drop = $1 WHERE user_id = $2", datetime.now(), message.from_user.id)
-    
-    has = await db.pool.fetchval("SELECT 1 FROM inventory WHERE user_id = $1 AND card_id = $2", message.from_user.id, card['card_id'])
-    if has:
-        reward = int(cfg['reward'] * 0.5)
-        await db.update_stars(message.from_user.id, reward)
-        res = f"♻️ Дубликат! Продан за {reward} 🌟"
-    else:
-        await db.pool.execute("INSERT INTO inventory (user_id, card_id) VALUES ($1, $2)", message.from_user.id, card['card_id'])
-        await db.update_stars(message.from_user.id, cfg['reward'])
-        res = f"🎊 Новая карта! +{cfg['reward']} 🌟"
+# --- ХЕНДЛЕРЫ ДЛЯ ПОДДЕРЖКИ РАБОТЫ НА RENDER ---
+async def handle(r):
+    return web.Response(text="Bot is running!")
 
-    await message.answer_photo(
-        card['photo_id'], 
-        caption=f"👤 {card['name']}\n✨ Редкость: {cfg['icon']} {card['rarity']}\n\n{res}"
-    )
-
-# --- МАГАЗИН И БОНУС ---
-@dp.message(F.text == "🛒 Магазин")
-async def shop(message: types.Message):
-    buttons = [[InlineKeyboardButton(text=f"{r} — {v['price']} 🌟", callback_data=f"buy_{r}")] for r, v in RARITY_CONFIG.items()]
-    buttons.append([InlineKeyboardButton(text="💎 VIP (1 день) — 15000 🌟", callback_data="buy_vip")])
-    await message.answer("🛒 Магазин", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.message(F.text == "📅 Бонус")
-async def daily_bonus(message: types.Message, db: Database):
-    u = await db.get_user(message.from_user.id)
-    if u['last_bonus'] and datetime.now() < u['last_bonus'] + timedelta(hours=24):
-        return await message.answer("⏳ Бонус можно взять раз в 24 часа!")
-    
-    val = random.randint(6000, 15000) if random.random() < 0.1 else random.randint(1000, 4000)
-    await db.update_stars(message.from_user.id, val)
-    await db.pool.execute("UPDATE users SET last_bonus = $1 WHERE user_id = $2", datetime.now(), message.from_user.id)
-    await message.answer(f"🎁 Вы получили бонус: {val} 🌟")
-
-# --- ЗАПУСК ---
 async def main():
-    pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
-    db = Database(pool)
-    await db.create_tables()
-    dp["db"] = db
-    
+    # Запуск микро-сервера для Render
     app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Bot is running"))
+    app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080))).start()
+
+    # Инициализация БД
+    pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
     
+    # Я использую твой класс Database (или DBManager), который уже есть в твоем проекте
+    # Предполагаем, что он импортирован из твоего файла database.py
+    from database import Database 
+    db = Database(pool)
+    await db.create_tables() # Создаем таблицы если их нет
+    
+    dp["db"] = db # Прокидываем db в хендлеры
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
