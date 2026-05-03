@@ -22,7 +22,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = "@Miflcards"
 CHANNEL_URL = "https://t.me/Miflcards"
-ADMIN_IDS = [1866813859]
+ADMIN_IDS = [1866813859] # Твой ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -118,7 +118,7 @@ async def adm_reset(message: types.Message, command: CommandObject, db: Database
     if not command.args: return await message.answer("Укажи ID игрока.")
     uid = int(command.args)
     await db.pool.execute("DELETE FROM inventory WHERE user_id = $1", uid)
-    await db.pool.execute("UPDATE users SET stars = 0 WHERE user_id = $1", uid)
+    await db.pool.execute("UPDATE users SET stars = 0, vip_until = NULL WHERE user_id = $1", uid)
     await message.answer(f"✅ Прогресс игрока {uid} обнулен.")
 
 @dp.message(Command("clear_cards"))
@@ -313,8 +313,21 @@ async def cmd_start(message: types.Message, command: CommandObject, db: Database
     if ref and ref != message.from_user.id: await db.update_stars(ref, 5000)
     await message.answer("⚽ Привет в MIfl Cards!", reply_markup=main_kb())
 
+# --- RENDER WEB SERVER ---
+async def handle_health(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
 async def main():
-    asyncio.create_task(web._run_app(web.Application().add_routes([web.get('/', lambda r: web.Response(text="OK"))]), port=int(os.environ.get("PORT", 8080))))
+    asyncio.create_task(start_web_server())
     pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
     db = Database(pool)
     await db.create_tables()
