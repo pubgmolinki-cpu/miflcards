@@ -286,8 +286,8 @@ async def game_timer(msg: types.Message, state: FSMContext):
 
 @dp.message(Form.guess_bet)
 async def guess_logic(message: types.Message, state: FSMContext, db: Database):
-    if not message.text.isdigit(): return
-    bet = int(message.text)
+    if not message.text.replace('.', '', 1).isdigit(): return
+    bet = int(float(message.text))
     
     if bet > 20000:
         return await message.answer("❌ Максимальная ставка в Угадайке — 20 000 🌟!")
@@ -401,7 +401,7 @@ async def leaderboard(message: types.Message, state: FSMContext, db: Database):
     txt = "🏆 <b>ТОП-10 ИГРОКОВ:</b>\n\n" + "\n".join([f"{i+1}. {r['username']} — {r['stars']} 🌟" for i, r in enumerate(rows)])
     await message.answer(txt, parse_mode="HTML")
 
-# --- АДМИН ПАНЕЛЬ (ИЗМЕНЕНА ЛОГИКА /add_player) ---
+# --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("add_promo"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_promo(message: types.Message, command: CommandObject, db: Database):
     try:
@@ -418,7 +418,6 @@ async def adm_add_p(message: types.Message, state: FSMContext):
 @dp.message(Form.add_player_photo, F.photo)
 async def adm_p_photo(message: types.Message, state: FSMContext):
     await state.update_data(fid=message.photo[-1].file_id)
-    # Запрашиваем 4 параметра вместо 5
     await message.answer("Данные (Имя, Рейтинг, Клуб, Позиция):")
     await state.set_state(Form.add_player_data)
 
@@ -432,16 +431,21 @@ async def adm_p_save(message: types.Message, state: FSMContext, db: Database):
     try:
         rating = float(d[1])
     except ValueError:
-        return await message.answer("❌ Ошибка! Рейтинг должен быть числом (например, 85 или 90). Попробуй еще раз ввести данные:")
+        return await message.answer("❌ Ошибка! Рейтинг должен быть числом (например, 3.5 или 5.0). Попробуй еще раз ввести данные:")
 
     name, club, position = d[0], d[2], d[3]
     
-    # Авто-определение редкости
-    if rating >= 90: rarity = "One"
-    elif rating >= 85: rarity = "Chase"
-    elif rating >= 80: rarity = "Drop"
-    elif rating >= 75: rarity = "Series"
-    else: rarity = "Stock"
+    # НОВАЯ ЛОГИКА АВТО-РЕДКОСТИ (Шкала 0.5 - 5.0)
+    if rating >= 5.0:
+        rarity = "One"
+    elif rating >= 4.0:
+        rarity = "Chase"
+    elif rating >= 3.0:
+        rarity = "Drop"
+    elif rating >= 2.0:
+        rarity = "Series"
+    else:
+        rarity = "Stock"
 
     fid = (await state.get_data())['fid']
     
