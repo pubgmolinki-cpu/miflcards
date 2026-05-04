@@ -155,7 +155,7 @@ async def animate_pack_opening(chat_id, card, reward_text=""):
         
     await bot.send_photo(chat_id, photo=card['photo_id'], caption=cap)
 
-# --- ПРОФИЛЬ И КОЛЛЕКЦИЯ (С РАБОЧИМ ФОТО!) ---
+# --- ПРОФИЛЬ И КОЛЛЕКЦИЯ ---
 @dp.message(F.text == "👤 Профиль")
 async def view_profile(message: types.Message, state: FSMContext, db: Database):
     await state.clear()
@@ -401,7 +401,7 @@ async def leaderboard(message: types.Message, state: FSMContext, db: Database):
     txt = "🏆 <b>ТОП-10 ИГРОКОВ:</b>\n\n" + "\n".join([f"{i+1}. {r['username']} — {r['stars']} 🌟" for i, r in enumerate(rows)])
     await message.answer(txt, parse_mode="HTML")
 
-# --- АДМИН ПАНЕЛЬ ---
+# --- АДМИН ПАНЕЛЬ (ИЗМЕНЕНА ЛОГИКА /add_player) ---
 @dp.message(Command("add_promo"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_promo(message: types.Message, command: CommandObject, db: Database):
     try:
@@ -418,16 +418,42 @@ async def adm_add_p(message: types.Message, state: FSMContext):
 @dp.message(Form.add_player_photo, F.photo)
 async def adm_p_photo(message: types.Message, state: FSMContext):
     await state.update_data(fid=message.photo[-1].file_id)
-    await message.answer("Данные (Имя, Рейтинг, Клуб, Позиция, Редкость):")
+    # Запрашиваем 4 параметра вместо 5
+    await message.answer("Данные (Имя, Рейтинг, Клуб, Позиция):")
     await state.set_state(Form.add_player_data)
 
 @dp.message(Form.add_player_data)
 async def adm_p_save(message: types.Message, state: FSMContext, db: Database):
     d = [x.strip() for x in message.text.split(",")]
+    
+    if len(d) != 4:
+        return await message.answer("❌ Ошибка формата! Введите ровно 4 значения через запятую:\nИмя, Рейтинг, Клуб, Позиция")
+        
+    try:
+        rating = float(d[1])
+    except ValueError:
+        return await message.answer("❌ Ошибка! Рейтинг должен быть числом (например, 85 или 90). Попробуй еще раз ввести данные:")
+
+    name, club, position = d[0], d[2], d[3]
+    
+    # Авто-определение редкости
+    if rating >= 90: rarity = "One"
+    elif rating >= 85: rarity = "Chase"
+    elif rating >= 80: rarity = "Drop"
+    elif rating >= 75: rarity = "Series"
+    else: rarity = "Stock"
+
     fid = (await state.get_data())['fid']
-    await db.pool.execute("INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)", d[0], float(d[1]), d[2], d[3], d[4], fid)
-    await message.answer("✅ Карта добавлена!")
-    await state.clear()
+    
+    try:
+        await db.pool.execute(
+            "INSERT INTO mifl_cards (name, rating, club, position, rarity, photo_id) VALUES ($1, $2, $3, $4, $5, $6)", 
+            name, rating, club, position, rarity, fid
+        )
+        await message.answer(f"✅ Карта {name} добавлена!\n✨ Присвоена редкость: {rarity}")
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка базы данных: {e}")
 
 @dp.message(Command("clear_cards"), F.from_user.id.in_(ADMIN_IDS))
 async def adm_clear(message: types.Message, db: Database):
