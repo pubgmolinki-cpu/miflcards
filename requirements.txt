@@ -1,6 +1,5 @@
-aiogram
-async
-python-dotenv
+aiogram==3.4.1
 asyncpg
+python-dotenv
 aiohttp
 Pillow
