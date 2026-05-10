@@ -1,56 +1,35 @@
 import asyncio
-from aiohttp import web
+import asyncpg
+import logging
 from aiogram import Bot, Dispatcher
+from config import TOKEN, DATABASE_URL
 
-from config import BOT_TOKEN
+# Импорт роутеров из файлов
+from handlers.user_profile import profile_router
+from handlers.stake_menu import stake_router
 from database import Database
 
-from handlers import cards
-from handlers import bets
-from handlers import matches
-from handlers import admin
-
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
-
-async def health(request):
-    return web.Response(text="MIFL UNIVERSE ONLINE")
-
-async def start_webserver():
-
-    app = web.Application()
-    app.router.add_get('/', health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(
-        runner,
-        '0.0.0.0',
-        8080
-    )
-
-    await site.start()
+logging.basicConfig(level=logging.INFO)
 
 async def main():
+    bot = Bot(token=TOKEN)
+    dp = Dispatcher()
 
-    db = Database()
-
-    await db.connect()
+    # Подключение к БД
+    pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
+    db = Database(pool)
     await db.create_tables()
+    
+    # Прокидываем db во все хэндлеры через middleware (или просто передаем в kwargs)
+    dp["db"] = db 
 
-    dp['db'] = db
-
-    dp.include_router(cards.router)
-    dp.include_router(bets.router)
-    dp.include_router(matches.router)
-    dp.include_router(admin.router)
-
-    asyncio.create_task(start_webserver())
+    # Подключение роутеров
+    dp.include_router(profile_router)
+    dp.include_router(stake_router)
+    # dp.include_router(admin_mifl_router)
 
     await bot.delete_webhook(drop_pending_updates=True)
-
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
